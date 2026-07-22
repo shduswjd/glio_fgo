@@ -1,1 +1,4 @@
 PyYAML>=6.0,<7.0
+numpy==1.26.4
+gtsam==4.2
+pymap3d

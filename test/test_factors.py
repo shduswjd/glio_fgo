@@ -9,6 +9,7 @@ src_root = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(src_root))
 
 from factors.prior import create_prior_factors, create_prior_noise
+from factors.pseudorange_factor import create_pseudorange_factor
 from factors.gnss_position import (
     create_factor_from_measurement,
     create_gnss_noise,
@@ -88,6 +89,50 @@ def test_gnss_factor_residual_includes_body_lever_arm():
     values = gtsam.Values()
     values.insert(key, pose)
     assert factor.unwhitenedError(values) == pytest.approx(np.zeros(3))
+
+
+def test_pseudorange_factor_residual_and_jacobians():
+    pose_key = gtsam.symbol("x", 0)
+    clock_key = gtsam.symbol("c", 0)
+    pose = gtsam.Pose3(gtsam.Rot3.RzRyRx(0.1, -0.2, 0.3), [1.0, 2.0, 3.0])
+    lever = np.array([0.5, -0.1, 0.2])
+    satellite = np.array([20_000_000.0, 14_000_000.0, 21_000_000.0])
+    clock_bias = 75.0
+    antenna = np.asarray(pose.transformFrom(lever))
+    measured = np.linalg.norm(satellite - antenna) + clock_bias
+    factor = create_pseudorange_factor(
+        pose_key,
+        clock_key,
+        satellite,
+        measured,
+        gtsam.noiseModel.Isotropic.Sigma(1, 3.0),
+        lever,
+    )
+    values = gtsam.Values()
+    values.insert(pose_key, pose)
+    values.insert(clock_key, clock_bias)
+
+    assert factor.unwhitenedError(values) == pytest.approx(np.zeros(1))
+
+    _, jacobians = factor.linearize(values).jacobianUnweighted()
+    def residual(candidate):
+        return np.array([
+            np.linalg.norm(satellite - np.asarray(candidate.transformFrom(lever)))
+            + clock_bias
+            - measured
+        ])
+
+    epsilon = 1e-5
+    numerical_pose = np.column_stack([
+        (
+            residual(pose.retract(np.eye(6)[column] * epsilon))
+            - residual(pose.retract(-np.eye(6)[column] * epsilon))
+        )
+        / (2.0 * epsilon)
+        for column in range(6)
+    ])
+    assert jacobians[:, :6] == pytest.approx(numerical_pose, abs=1e-5)
+    assert jacobians[:, 6:] == pytest.approx(np.ones((1, 1)))
 
 
 def test_create_factor_from_measurement_uses_measurement_covariance():
