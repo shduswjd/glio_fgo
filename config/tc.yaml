@@ -1,0 +1,8 @@
+data:
+  path: "./campus"
+  imu:  "Tactical_imu_data.txt"
+  nav: "BRDM00DLR_S_20203010000_01D_MN.rnx"
+  obs: "campus-day.20O"
+  # seconds; use null to process the entire bag
+  duration: null #5.0
+
