@@ -1,0 +1,40 @@
+bag:
+  path: 01_13B_Jackal/base_2023-07-18-14-26-48_0.bag
+  # seconds; use null to process the entire bag
+  duration: null #5.0
+
+topics:
+  imu: /microstrain/imu/data
+  gnss: /piksi/navsatfix_best_fix
+
+optimizer:
+  keyframe_interval: 0.2
+  gravity: 9.81
+
+imu_noise:
+  accelerometer_sigma: 0.01
+  gyroscope_sigma: 0.001
+  integration_sigma: 1.0e-4
+  accelerometer_bias_sigma: 6.706087584689249e-06
+  gyroscope_bias_sigma: 3.5636559575381104e-06
+
+# Pose of imu_link expressed in base_link.
+# Quaternion order follows the calibration table: [qx, qy, qz, qw].
+imu_extrinsic:
+  translation: [0.06805894, 0.00897905, 0.30094700]
+  quaternion_xyzw: [0.00290040, 0.00100573, 0.99999431, -0.00139632]
+
+gnss:
+  # GNSS antenna position expressed in the body frame [m]
+  lever_arm_body: [-0.18, 0.0, 0.5317]
+  minimum_sigma: 0.1
+
+prior_noise:
+  rotation_sigma: [0.1, 0.1, 0.5]
+  position_sigma: [1.0, 1.0, 2.0]
+  velocity_sigma: 0.5
+  accel_bias_sigma: [0.1, 0.1, 0.1]
+  gyro_bias_sigma: [0.01, 0.01, 0.01]
+
+output:
+  trajectory_csv: agr_fgo/results/01_13B_Jackal/trajectory.csv
