@@ -84,8 +84,10 @@ def synchronize_trajectories(fgo: pd.DataFrame, gt: pd.DataFrame) -> pd.DataFram
     # angle (counter-clockwise from East), hence yaw = 90 deg - heading.
     gt_yaw = np.unwrap(np.deg2rad(90.0 - gt["heading_deg"].to_numpy()))
     synced["gt_yaw_rad"] = np.interp(times, gt["gps_time_s"], gt_yaw)
+    # The reference INS reports positive pitch nose-down, whereas GTSAM's FLU
+    # RzRyRx convention is positive nose-up.
     synced["gt_pitch_rad"] = np.interp(
-        times, gt["gps_time_s"], np.deg2rad(gt["pitch_deg"]),
+        times, gt["gps_time_s"], -np.deg2rad(gt["pitch_deg"]),
     )
     synced["gt_roll_rad"] = np.interp(
         times, gt["gps_time_s"], np.deg2rad(gt["roll_deg"]),

@@ -30,7 +30,17 @@ tightly_coupled:
   # x: antenna is about 0.04 m opposite +x
   # y: antenna is 0.33 m opposite +y
   # z: antenna height 0.15 m - IMU height (-0.01 m) = +0.16 m
-  lever_arm_body_m: [-0.05, -0.33, 0.16]
+  lever_arm_body_m: [-0.33, 0.05, 0.16]
+  imu_extrinsic:
+    translation_m: [0.0, 0.0, 0.0]
+    quaternion_xyzw: [0.0, 0.0, -0.7071067811865476, 0.7071067811865476]
+  initial_alignment:
+    stationary_duration_s: 10.0
+    course_search_duration_s: 90.0
+    minimum_course_speed_mps: 2.0
+    course_tolerance_deg: 12.0
+    required_course_samples: 3
+    fallback_yaw_deg: 0.0
   imu:
     skip_rows: 1
     timestamp_column: 0

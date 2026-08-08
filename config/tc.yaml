@@ -46,12 +46,21 @@ tightly_coupled:
   relinearize_threshold: 0.1
   relinearize_skip: 10
   final_update_iterations: 20
-  # Tactical-grade IMU (sensor 5) -> GNSS antenna (sensor 6), expressed in
-  # the tactical IMU axes shown in the campus sensor-layout figure.
-  # x: antenna is about 0.04 m opposite +x
-  # y: antenna is 0.33 m opposite +y
-  # z: antenna height 0.15 m - IMU height (-0.01 m) = +0.16 m
-  lever_arm_body_m: [-0.05, -0.33, 0.16]
+  # Estimator body is FLU (x forward, y left, z up). The campus tactical IMU
+  # is RFU (x right, y forward, z up), so RFU [-0.05, -0.33, 0.16] becomes:
+  lever_arm_body_m: [-0.33, 0.05, 0.16]
+  imu_extrinsic:
+    # Pose of the RFU IMU sensor frame expressed in the FLU body frame.
+    # R_body_sensor maps [right, forward, up] -> [forward, left, up].
+    translation_m: [0.0, 0.0, 0.0]
+    quaternion_xyzw: [0.0, 0.0, -0.7071067811865476, 0.7071067811865476]
+  initial_alignment:
+    stationary_duration_s: 10.0
+    course_search_duration_s: 90.0
+    minimum_course_speed_mps: 2.0
+    course_tolerance_deg: 12.0
+    required_course_samples: 3
+    fallback_yaw_deg: 0.0
   imu:
     skip_rows: 1
     timestamp_column: 0

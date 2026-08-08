@@ -76,6 +76,76 @@ def _nearest_imu_index(imu: list[ImuMeasurement], timestamp: float, start: int =
     return start + int(np.argmin(np.abs(times - timestamp)))
 
 
+def _body_P_sensor(options: dict) -> gtsam.Pose3:
+    """Return the IMU sensor pose expressed in the estimator body frame."""
+    quaternion = np.asarray(options.get("quaternion_xyzw", [0, 0, 0, 1]), dtype=float)
+    translation = np.asarray(options.get("translation_m", [0, 0, 0]), dtype=float)
+    if quaternion.shape != (4,) or translation.shape != (3,):
+        raise ValueError("imu_extrinsic requires quaternion_xyzw[4] and translation_m[3]")
+    norm = np.linalg.norm(quaternion)
+    if not np.all(np.isfinite(quaternion)) or not np.all(np.isfinite(translation)) or norm == 0:
+        raise ValueError("imu_extrinsic values must be finite and quaternion non-zero")
+    qx, qy, qz, qw = quaternion / norm
+    return gtsam.Pose3(gtsam.Rot3.Quaternion(qw, qx, qy, qz), translation)
+
+
+def _stationary_initialization(
+    imu: list[ImuMeasurement], start_index: int, body_R_sensor: np.ndarray,
+    duration_s: float, gravity: float,
+) -> tuple[float, float, np.ndarray]:
+    """Estimate level attitude and gyro bias from the initial quiet interval."""
+    start_time = imu[start_index].timestamp
+    samples = [
+        item for item in imu[start_index:]
+        if item.timestamp - start_time <= duration_s
+    ]
+    if len(samples) < 2:
+        return 0.0, 0.0, np.zeros(3)
+    acceleration = np.array([body_R_sensor @ item.acceleration for item in samples])
+    angular_rate = np.array([body_R_sensor @ item.angular_velocity for item in samples])
+    # Reject moving samples before taking robust component-wise medians.
+    quiet = (
+        np.abs(np.linalg.norm(acceleration, axis=1) - gravity) < 0.35
+    ) & (np.linalg.norm(angular_rate, axis=1) < np.deg2rad(1.0))
+    if np.count_nonzero(quiet) < max(10, len(samples) // 2):
+        return 0.0, 0.0, np.zeros(3)
+    mean_acceleration = np.median(acceleration[quiet], axis=0)
+    # Gyro output is quantized on this dataset; the median collapses the small
+    # z-bias to exactly zero. The quiet-sample mean preserves the sub-LSB bias.
+    gyro_bias = np.mean(angular_rate[quiet], axis=0)
+    roll = float(np.arctan2(mean_acceleration[1], mean_acceleration[2]))
+    pitch = float(np.arctan2(
+        -mean_acceleration[0],
+        np.hypot(mean_acceleration[1], mean_acceleration[2]),
+    ))
+    return roll, pitch, gyro_bias
+
+
+def _consistent_course_yaw(
+    velocities_local: list[np.ndarray], minimum_speed: float, tolerance_deg: float,
+    required_samples: int,
+) -> tuple[float, int] | None:
+    """Find the first stable GNSS course, expressed as ENU yaw from East."""
+    headings: list[float] = []
+    tolerance = np.deg2rad(tolerance_deg)
+    for velocity_index, velocity in enumerate(velocities_local):
+        if np.linalg.norm(velocity[:2]) < minimum_speed:
+            headings.clear()
+            continue
+        heading = float(np.arctan2(velocity[1], velocity[0]))
+        headings.append(heading)
+        headings = headings[-required_samples:]
+        if len(headings) == required_samples:
+            mean = float(np.arctan2(
+                np.mean(np.sin(headings)), np.mean(np.cos(headings))
+            ))
+            errors = np.arctan2(np.sin(np.asarray(headings) - mean),
+                                np.cos(np.asarray(headings) - mean))
+            if np.max(np.abs(errors)) <= tolerance:
+                return mean, velocity_index
+    return None
+
+
 def estimate_velocity_and_clock_drift(measurements, receiver_ecef: np.ndarray) -> tuple[np.ndarray, float]:
     """Solve ECEF receiver velocity and clock drift from Doppler observations."""
     rows, values = [], []
@@ -162,7 +232,12 @@ def build_tightly_coupled_graph(
     frame_rotation = ecef_R_enu(reference_ecef)
     lever = np.asarray(tc["lever_arm_body_m"], dtype=float)
     imu_noise = ImuNoise(**tc["imu_noise"])
-    params = create_preintegration_params(float(tc["gravity_mps2"]), imu_noise)
+    gravity = float(tc["gravity_mps2"])
+    body_P_sensor = _body_P_sensor(tc.get("imu_extrinsic", {}))
+    body_R_sensor = body_P_sensor.rotation().matrix()
+    params = create_preintegration_params(
+        gravity, imu_noise, body_P_sensor=body_P_sensor,
+    )
     prior = tc["prior_noise"]
 
     graph = gtsam.NonlinearFactorGraph()
@@ -176,9 +251,72 @@ def build_tightly_coupled_graph(
         minimum_cn0_dbhz=minimum_cn0, residual_gate_m=residual_gate,
     )
     velocity_ecef, initial_drift = estimate_velocity_and_clock_drift(first_prepared, reference_ecef)
+    initial_imu_cursor = _nearest_imu_index(imu, epochs[0].gps_seconds_of_week)
+    alignment = tc.get("initial_alignment", {})
+    initial_roll, initial_pitch, initial_gyro_bias = _stationary_initialization(
+        imu, initial_imu_cursor, body_R_sensor,
+        float(alignment.get("stationary_duration_s", 10.0)), gravity,
+    )
+    course_velocities = [frame_rotation.T @ velocity_ecef]
+    search_duration = float(alignment.get("course_search_duration_s", 90.0))
+    for alignment_epoch in epochs[1:]:
+        if alignment_epoch.gps_seconds_of_week - epochs[0].gps_seconds_of_week > search_duration:
+            break
+        try:
+            alignment_ecef, _ = estimate_receiver_position(
+                alignment_epoch, ephemerides, signal, secondary_signal
+            )
+            alignment_prepared = prepare_epoch(
+                alignment_epoch, alignment_ecef, ephemerides, signal=signal,
+                secondary_signal=secondary_signal,
+                minimum_elevation_deg=float(raw["minimum_elevation_deg"]),
+                signals=signals, beidou_orbits=beidou_orbits,
+                minimum_cn0_dbhz=minimum_cn0, residual_gate_m=residual_gate,
+            )
+            alignment_velocity_ecef, _ = estimate_velocity_and_clock_drift(
+                alignment_prepared, alignment_ecef
+            )
+            course_velocities.append(frame_rotation.T @ alignment_velocity_ecef)
+        except ValueError:
+            course_velocities.append(np.zeros(3))
+    course_alignment = _consistent_course_yaw(
+        course_velocities,
+        float(alignment.get("minimum_course_speed_mps", 2.0)),
+        float(alignment.get("course_tolerance_deg", 12.0)),
+        int(alignment.get("required_course_samples", 3)),
+    )
+    if course_alignment is None:
+        initial_yaw = float(alignment.get("fallback_yaw_deg", 0.0)) * np.pi / 180.0
+    else:
+        course_yaw, course_epoch_index = course_alignment
+        course_time = epochs[course_epoch_index].gps_seconds_of_week
+        end_imu = _nearest_imu_index(imu, course_time, initial_imu_cursor)
+        integrated_body_yaw = 0.0
+        for previous, following in zip(
+            imu[initial_imu_cursor:end_imu],
+            imu[initial_imu_cursor + 1:end_imu + 1],
+        ):
+            body_rate = body_R_sensor @ previous.angular_velocity - initial_gyro_bias
+            integrated_body_yaw += body_rate[2] * (following.timestamp - previous.timestamp)
+        initial_yaw = float(np.arctan2(
+            np.sin(course_yaw - integrated_body_yaw),
+            np.cos(course_yaw - integrated_body_yaw),
+        ))
+    print(
+        "initial alignment [deg]: "
+        f"roll={np.rad2deg(initial_roll):.3f} "
+        f"pitch={np.rad2deg(initial_pitch):.3f} "
+        f"yaw={np.rad2deg(initial_yaw):.3f}; "
+        f"gyro bias [deg/s]={np.rad2deg(initial_gyro_bias)}",
+        flush=True,
+    )
+    initial_rotation = gtsam.Rot3.Ypr(initial_yaw, initial_pitch, initial_roll)
+    initial_body_position = -initial_rotation.matrix() @ lever
     current = NavigationState(
-        timestamp=epochs[0].gps_seconds_of_week, pose=gtsam.Pose3(),
+        timestamp=epochs[0].gps_seconds_of_week,
+        pose=gtsam.Pose3(initial_rotation, initial_body_position),
         velocity=frame_rotation.T @ velocity_ecef,
+        gyro_bias=initial_gyro_bias,
     )
     current_clock_bias = initial_clock
     current_clock_drift = initial_drift
@@ -260,7 +398,7 @@ def build_tightly_coupled_graph(
                 ))
 
     add_gnss(0, first_prepared)
-    imu_cursor = _nearest_imu_index(imu, epochs[0].gps_seconds_of_week)
+    imu_cursor = initial_imu_cursor
     prepared_epochs = [first_prepared]
     for index, epoch in enumerate(epochs[1:], start=1):
         end_cursor = _nearest_imu_index(imu, epoch.gps_seconds_of_week, imu_cursor + 1)
