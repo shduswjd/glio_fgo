@@ -63,6 +63,21 @@ class SatelliteObservation:
     def pseudorange(self, signal: str = "1C") -> float | None:
         return self.value("C" + signal)
 
+    def ionosphere_free_pseudorange(
+        self, primary_signal: str, secondary_signal: str
+    ) -> float | None:
+        """Return the first-order ionosphere-free dual-frequency code [m]."""
+        primary = self.pseudorange(primary_signal)
+        secondary = self.pseudorange(secondary_signal)
+        if primary is None or secondary is None:
+            return None
+        f1 = carrier_frequency_hz(self.satellite, primary_signal)
+        f2 = carrier_frequency_hz(self.satellite, secondary_signal)
+        denominator = f1 * f1 - f2 * f2
+        if denominator == 0.0:
+            raise ValueError("ionosphere-free signals must use different frequencies")
+        return (f1 * f1 * primary - f2 * f2 * secondary) / denominator
+
     def doppler(self, signal: str = "1C") -> float | None:
         return self.value("D" + signal)
 

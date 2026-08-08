@@ -1,4 +1,4 @@
-# .venv/bin/python agr_fgo/src/tightly_coupled_fgo.py --config agr_fgo/config/tc.yaml
+# .venv/bin/python agr_fgo/src/tightly_coupled_fgo.py --config agr_fgo/config/tc_imu_adjust.yaml
 
 data:
   # This path is relative to this YAML file, so the command works from any cwd.
@@ -10,31 +10,10 @@ data:
   duration: 606.0  # increase after validating this growing-graph prototype
 
 gnss_raw:
-  signals:
-    G:
-      primary: "1C"
-      secondary: "2W"  # GPS L1/L2 first-order ionosphere-free code
-    E:
-      primary: "1C"
-      secondary: "7Q"  # Galileo E1/E5b first-order ionosphere-free code
-    C:
-      primary: "7I"
-      secondary: "6I"  # BeiDou B2I/B3I first-order ionosphere-free code
-  # GEO degraded both horizontal and 3D RMSE in the campus A/B test.
-  beidou_orbits: ["MEO", "IGSO"]
+  signal: "1C"
+  secondary_signal: "2W"  # GPS L1/L2 first-order ionosphere-free code
   minimum_elevation_deg: 10.0
-  pseudorange_sigma_m:
-    G: 8.9
-    E: 8.9
-    C_MEO: 12.0
-    C_IGSO: 15.0
-    C_GEO: 25.0
-  weighting:
-    elevation_sin_floor: 0.25
-    cn0_reference_dbhz: 40.0
-    cn0_max_scale: 4.0
-    minimum_cn0_dbhz: 20.0
-    residual_gate_m: 30.0
+  pseudorange_sigma_m: 8.9  # IF noise amplification (~2.98 x a 3 m code sigma)
   doppler_sigma_mps: 0.3
   # null: estimate the first receiver ECEF position with pseudorange SPP.
   # If a surveyed value is available, use [x, y, z] metres for faster startup.
@@ -59,11 +38,11 @@ tightly_coupled:
     angular_velocity_scale: 0.017453292519943295  # deg/s -> rad/s
     accel_columns: [4, 5, 6]
   imu_noise:
-    accelerometer_sigma: 0.03
-    gyroscope_sigma: 0.003
-    integration_sigma: 1.0e-4
-    accelerometer_bias_sigma: 1.0e-3
-    gyroscope_bias_sigma: 1.0e-4
+    accelerometer_sigma: 0.01
+    gyroscope_sigma: 0.0003
+    integration_sigma: 1.0e-5
+    accelerometer_bias_sigma: 3.0e-4
+    gyroscope_bias_sigma: 3.0e-5
   prior_noise:
     rotation_sigma_rad: [0.1, 0.1, 0.5]
     position_sigma_m: [3.0, 3.0, 5.0]
@@ -75,19 +54,6 @@ tightly_coupled:
   clock_process:
     bias_sigma_m_sqrt_s: 3.0
     drift_sigma_mps_sqrt_s: 0.3
-  galileo_isb:
-    initial_sigma_m: 100.0
-    random_walk_sigma_m_sqrt_s: 0.3
-  beidou_isb:
-    initial_sigma_m: 100.0
-    random_walk_sigma_m_sqrt_s: 0.3
-  wet_delay:
-    # Available for experiments, but disabled by default: the campus A/B run
-    # slightly worsened Up/3D RMSE because this 10-minute code-only dataset
-    # does not separate ZWD well from height and receiver clock.
-    enabled: false
-    initial_sigma_m: 0.30
-    random_walk_sigma_m_sqrt_s: 0.005
   numerical_stabilization:
     rotation_sigma_rad: 3.0
     position_sigma_m: 10000.0
@@ -95,4 +61,4 @@ tightly_coupled:
     accel_bias_sigma_mps2: 10.0
     gyro_bias_sigma_radps: 1.0
     clock_drift_sigma_mps: 100.0
-  output_csv: "../results/great_data/tc_trajectory.csv"
+  output_csv: "../results/great_data/tc_trajectory_imu_adjust.csv"

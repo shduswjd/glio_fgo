@@ -75,6 +75,7 @@ def read_imu_txt(
     acceleration_columns: tuple[int, int, int] = (1, 2, 3),
     angular_velocity_columns: tuple[int, int, int] = (4, 5, 6),
     timestamp_scale: float = 1.0,
+    angular_velocity_scale: float = 1.0,
     delimiter: str | None = None,
     skip_rows: int = 0,
 ) -> Iterator[ImuMeasurement]:
@@ -92,6 +93,8 @@ def read_imu_txt(
         raise FileNotFoundError(f"IMU file not found: {path}")
     if not np.isfinite(timestamp_scale) or timestamp_scale <= 0.0:
         raise ValueError("timestamp_scale must be a positive finite number")
+    if not np.isfinite(angular_velocity_scale) or angular_velocity_scale <= 0.0:
+        raise ValueError("angular_velocity_scale must be a positive finite number")
 
     data = np.loadtxt(path, delimiter=delimiter, skiprows=skip_rows, ndmin=2)
     required_columns = (
@@ -120,7 +123,9 @@ def read_imu_txt(
         yield ImuMeasurement(
             timestamp=timestamp,
             acceleration=row[list(acceleration_columns)],
-            angular_velocity=row[list(angular_velocity_columns)],
+            angular_velocity=(
+                row[list(angular_velocity_columns)] * angular_velocity_scale
+            ),
         )
         previous_timestamp = timestamp
 

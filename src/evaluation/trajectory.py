@@ -1,203 +1,149 @@
-"""Compare an optimized FGO trajectory with CitrusFarm RTK ground truth."""
+"""Evaluate the campus01 GNSS/IMU FGO trajectory against RTK ground truth."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+import sys
+
+# Allow direct execution (``python agr_fgo/src/evaluation/trajectory.py``)
+# without requiring callers to set PYTHONPATH=agr_fgo/src.
+SRC_DIR = Path(__file__).resolve().parents[1]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import yaml
+
+from sensors.gnss_corrections import ecef_R_enu
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-FGO_FILE = PROJECT_ROOT / "agr_fgo/results/01_13B_Jackal/trajectory.csv"
-GT_FILE = PROJECT_ROOT / "01_13B_Jackal/ground_truth/gt.csv"
-CONFIG_FILE = PROJECT_ROOT / "agr_fgo/config/default.yaml"
-OUTPUT_DIR = PROJECT_ROOT / "agr_fgo/results/01_13B_Jackal"
-
-
-def rotation_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """Return R_world_body using the ZYX yaw-pitch-roll convention."""
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    return np.array([
-        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-        [-sp, cp * sr, cp * cr],
-    ])
+DEFAULT_FGO = PROJECT_ROOT / "agr_fgo/results/great_data/tc_trajectory.csv"
+DEFAULT_GT = PROJECT_ROOT / "great_data/groundtruth01.txt"
+DEFAULT_OUTPUT = PROJECT_ROOT / "agr_fgo/results/great_data"
+GPS_WEEK_SECONDS = 604_800.0
 
 
 def load_trajectories(
-    fgo_file: Path,
-    gt_file: Path,
+    fgo_file: Path, gt_file: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Read and validate FGO and ground-truth trajectory files."""
-    df_fgo = pd.read_csv(fgo_file)
-    gt_columns = ["timestamp", "tx", "ty", "tz", "qx", "qy", "qz", "qw"]
-    df_gt = pd.read_csv(
-        gt_file,
-        comment="#",
-        header=None,
-        names=gt_columns,
-    )
-    required_fgo = {
-        "timestamp_s",
-        "position_east_m",
-        "position_north_m",
-        "position_up_m",
-        "roll",
-        "pitch",
-        "yaw",
+    """Load FGO CSV and campus ground truth using one absolute GPST axis."""
+    fgo = pd.read_csv(fgo_file)
+    required = {
+        "gps_time_s", "antenna_ecef_x_m", "antenna_ecef_y_m",
+        "antenna_ecef_z_m", "roll", "pitch", "yaw",
     }
-    missing = required_fgo.difference(df_fgo.columns)
+    missing = required.difference(fgo.columns)
     if missing:
-        raise ValueError(f"FGO CSV is missing columns: {', '.join(sorted(missing))}")
-    df_fgo = df_fgo.sort_values("timestamp_s").drop_duplicates("timestamp_s")
-    df_gt = df_gt.sort_values("timestamp").drop_duplicates("timestamp")
-    return df_fgo, df_gt
+        raise ValueError(
+            "FGO CSV is missing columns (rerun tightly_coupled_fgo.py): "
+            + ", ".join(sorted(missing))
+        )
 
-
-def synchronize_trajectories(
-    df_fgo: pd.DataFrame,
-    df_gt: pd.DataFrame,
-    lever_arm_body: np.ndarray,
-) -> pd.DataFrame:
-    """Interpolate GT at FGO times and compare GPS antenna positions in ENU."""
-    overlap_start = max(df_fgo["timestamp_s"].min(), df_gt["timestamp"].min())
-    overlap_end = min(df_fgo["timestamp_s"].max(), df_gt["timestamp"].max())
-    if overlap_start >= overlap_end:
-        raise ValueError("FGO and ground-truth timestamps do not overlap")
-
-    synced = df_fgo[
-        (df_fgo["timestamp_s"] >= overlap_start)
-        & (df_fgo["timestamp_s"] <= overlap_end)
-    ].copy()
-    timestamps = synced["timestamp_s"].to_numpy()
-
-    # CitrusFarm rtk_path_frame uses x=North, y=-East, z=Up.
-    synced["gt_east_m"] = -np.interp(timestamps, df_gt["timestamp"], df_gt["ty"])
-    synced["gt_north_m"] = np.interp(timestamps, df_gt["timestamp"], df_gt["tx"])
-    synced["gt_up_m"] = np.interp(timestamps, df_gt["timestamp"], df_gt["tz"])
-
-    estimated_antenna = []
-    for row in synced.itertuples():
-        rotation = rotation_from_rpy(row.roll, row.pitch, row.yaw)
-        base_position = np.array([
-            row.position_east_m,
-            row.position_north_m,
-            row.position_up_m,
-        ])
-        estimated_antenna.append(base_position + rotation @ lever_arm_body)
-    estimated_antenna = np.asarray(estimated_antenna)
-    synced["fgo_antenna_east_m"] = estimated_antenna[:, 0]
-    synced["fgo_antenna_north_m"] = estimated_antenna[:, 1]
-    synced["fgo_antenna_up_m"] = estimated_antenna[:, 2]
-
-    synced["error_east_m"] = synced["fgo_antenna_east_m"] - synced["gt_east_m"]
-    synced["error_north_m"] = synced["fgo_antenna_north_m"] - synced["gt_north_m"]
-    synced["error_up_m"] = synced["fgo_antenna_up_m"] - synced["gt_up_m"]
-    synced["error_horizontal_m"] = np.hypot(
-        synced["error_east_m"], synced["error_north_m"]
+    # groundtruth01 columns begin with: GPS week, SOW, ECEF X/Y/Z. The
+    # latitude/longitude DMS fields later on are intentionally not loaded.
+    raw_gt = np.loadtxt(
+        gt_file, comments="#", usecols=(0, 1, 2, 3, 4, 21, 22, 23), ndmin=2,
     )
-    synced["error_3d_m"] = np.sqrt(
-        synced["error_horizontal_m"] ** 2 + synced["error_up_m"] ** 2
+    gt = pd.DataFrame(raw_gt, columns=[
+        "gps_week", "gps_sow", "x", "y", "z",
+        "heading_deg", "pitch_deg", "roll_deg",
+    ])
+    gt["gps_time_s"] = gt["gps_week"] * GPS_WEEK_SECONDS + gt["gps_sow"]
+    fgo = fgo.sort_values("gps_time_s").drop_duplicates("gps_time_s")
+    gt = gt.sort_values("gps_time_s").drop_duplicates("gps_time_s")
+    return fgo, gt
+
+
+def synchronize_trajectories(fgo: pd.DataFrame, gt: pd.DataFrame) -> pd.DataFrame:
+    """Interpolate 10 Hz RTK ECEF at 1 Hz FGO times and compute local ENU error."""
+    start = max(fgo["gps_time_s"].min(), gt["gps_time_s"].min())
+    end = min(fgo["gps_time_s"].max(), gt["gps_time_s"].max())
+    if start > end:
+        raise ValueError("FGO and ground-truth GPS timestamps do not overlap")
+    synced = fgo[(fgo["gps_time_s"] >= start) & (fgo["gps_time_s"] <= end)].copy()
+    times = synced["gps_time_s"].to_numpy()
+    gt_ecef = np.column_stack([
+        np.interp(times, gt["gps_time_s"], gt[axis]) for axis in ("x", "y", "z")
+    ])
+    estimated_ecef = synced[[
+        "antenna_ecef_x_m", "antenna_ecef_y_m", "antenna_ecef_z_m",
+    ]].to_numpy()
+    reference = gt_ecef[0]
+    rotation = ecef_R_enu(reference).T  # ECEF delta -> ENU
+    gt_enu = (rotation @ (gt_ecef - reference).T).T
+    estimated_enu = (rotation @ (estimated_ecef - reference).T).T
+    error = estimated_enu - gt_enu
+    for index, axis in enumerate(("east", "north", "up")):
+        synced[f"gt_{axis}_m"] = gt_enu[:, index]
+        synced[f"fgo_antenna_{axis}_m"] = estimated_enu[:, index]
+        synced[f"error_{axis}_m"] = error[:, index]
+    # GT heading is clockwise from North. FGO yaw is the ENU mathematical
+    # angle (counter-clockwise from East), hence yaw = 90 deg - heading.
+    gt_yaw = np.unwrap(np.deg2rad(90.0 - gt["heading_deg"].to_numpy()))
+    synced["gt_yaw_rad"] = np.interp(times, gt["gps_time_s"], gt_yaw)
+    synced["gt_pitch_rad"] = np.interp(
+        times, gt["gps_time_s"], np.deg2rad(gt["pitch_deg"]),
     )
+    synced["gt_roll_rad"] = np.interp(
+        times, gt["gps_time_s"], np.deg2rad(gt["roll_deg"]),
+    )
+    synced["error_horizontal_m"] = np.linalg.norm(error[:, :2], axis=1)
+    synced["error_3d_m"] = np.linalg.norm(error, axis=1)
     return synced
 
 
 def align_antenna_trajectory_svd(synced: pd.DataFrame) -> pd.DataFrame:
-    """Rigidly align the estimated GPS-antenna trajectory to GT using SVD."""
+    """Return a diagnostic rigid-alignment ATE without changing raw metrics."""
     estimated = synced[[
-        "fgo_antenna_east_m",
-        "fgo_antenna_north_m",
-        "fgo_antenna_up_m",
+        "fgo_antenna_east_m", "fgo_antenna_north_m", "fgo_antenna_up_m",
     ]].to_numpy()
-    ground_truth = synced[["gt_east_m", "gt_north_m", "gt_up_m"]].to_numpy()
+    truth = synced[["gt_east_m", "gt_north_m", "gt_up_m"]].to_numpy()
     if len(estimated) < 3:
         raise ValueError("at least three synchronized positions are required for SVD")
-
-    estimated_centroid = estimated.mean(axis=0)
-    ground_truth_centroid = ground_truth.mean(axis=0)
-    estimated_centered = estimated - estimated_centroid
-    ground_truth_centered = ground_truth - ground_truth_centroid
-    u, _, vt = np.linalg.svd(estimated_centered.T @ ground_truth_centered)
+    estimated_centered = estimated - estimated.mean(axis=0)
+    truth_centered = truth - truth.mean(axis=0)
+    u, _, vt = np.linalg.svd(estimated_centered.T @ truth_centered)
     rotation = vt.T @ u.T
     if np.linalg.det(rotation) < 0.0:
-        vt[-1, :] *= -1.0
+        vt[-1] *= -1.0
         rotation = vt.T @ u.T
-    translation = ground_truth_centroid - rotation @ estimated_centroid
+    translation = truth.mean(axis=0) - rotation @ estimated.mean(axis=0)
     aligned = (rotation @ estimated.T).T + translation
-
     result = synced.copy()
-    result["aligned_fgo_east_m"] = aligned[:, 0]
-    result["aligned_fgo_north_m"] = aligned[:, 1]
-    result["aligned_fgo_up_m"] = aligned[:, 2]
-    residual = aligned - ground_truth
-    result["aligned_error_east_m"] = residual[:, 0]
-    result["aligned_error_north_m"] = residual[:, 1]
-    result["aligned_error_up_m"] = residual[:, 2]
-    result["ate_m"] = np.linalg.norm(residual, axis=1)
+    result[["aligned_fgo_east_m", "aligned_fgo_north_m", "aligned_fgo_up_m"]] = aligned
+    result["ate_m"] = np.linalg.norm(aligned - truth, axis=1)
     return result
 
 
 def print_metrics(synced: pd.DataFrame) -> None:
-    """Print raw ENU diagnostics and SVD-aligned ATE metrics."""
-    rmse = lambda column: np.sqrt(np.mean(synced[column] ** 2))
+    rmse = lambda name: float(np.sqrt(np.mean(synced[name].to_numpy() ** 2)))
     print(f"Synchronized samples: {len(synced)}")
     print(f"East RMSE:       {rmse('error_east_m'):.3f} m")
     print(f"North RMSE:      {rmse('error_north_m'):.3f} m")
     print(f"Up RMSE:         {rmse('error_up_m'):.3f} m")
-    print(f"Up Max:          {synced['error_up_m'].abs().max():.3f} m")
     print(f"Horizontal RMSE: {rmse('error_horizontal_m'):.3f} m")
     print(f"3D RMSE:         {rmse('error_3d_m'):.3f} m")
-
-    timestamps = synced["timestamp_s"].to_numpy()
-    velocity_east = np.gradient(synced["gt_east_m"].to_numpy(), timestamps)
-    velocity_north = np.gradient(synced["gt_north_m"].to_numpy(), timestamps)
-    speed = np.hypot(velocity_east, velocity_north)
-    gt_course = np.arctan2(velocity_north, velocity_east)
-    yaw_error = np.arctan2(
-        np.sin(synced["yaw"].to_numpy() - gt_course),
-        np.cos(synced["yaw"].to_numpy() - gt_course),
-    )
-    moving = speed >= 0.2
-    if np.any(moving):
-        yaw_mae = np.rad2deg(np.mean(np.abs(yaw_error[moving])))
-        yaw_rmse = np.rad2deg(np.sqrt(np.mean(yaw_error[moving] ** 2)))
-        print(f"Heading/course consistency MAE:  {yaw_mae:.3f} deg")
-        print(f"Heading/course consistency RMSE: {yaw_rmse:.3f} deg")
-
-    ate = synced["ate_m"].to_numpy()
-    print("SVD-aligned ATE (rigid SE(3), fixed scale):")
-    print(f"  RMSE:   {np.sqrt(np.mean(ate**2)):.3f} m")
-    print(f"  Mean:   {np.mean(ate):.3f} m")
-    print(f"  Median: {np.median(ate):.3f} m")
-    print(f"  Max:    {np.max(ate):.3f} m")
+    if "ate_m" in synced:
+        print(f"SVD-aligned ATE RMSE (diagnostic): {rmse('ate_m'):.3f} m")
 
 
 def save_plot(synced: pd.DataFrame, output_path: Path) -> None:
-    """Save trajectory and raw ENU error plots."""
-    elapsed = synced["timestamp_s"] - synced["timestamp_s"].iloc[0]
+    elapsed = synced["gps_time_s"] - synced["gps_time_s"].iloc[0]
     figure, axes = plt.subplots(1, 2, figsize=(13, 5))
-    axes[0].plot(synced["gt_east_m"], synced["gt_north_m"], label="Ground truth", linewidth=2)
+    axes[0].plot(synced["gt_east_m"], synced["gt_north_m"], label="RTK ground truth")
     axes[0].plot(
-        synced["fgo_antenna_east_m"], synced["fgo_antenna_north_m"],
-        label="FGO antenna", linewidth=1.2,
+        synced["fgo_antenna_east_m"], synced["fgo_antenna_north_m"], label="FGO antenna",
     )
-    axes[0].plot(
-        synced["aligned_fgo_east_m"], synced["aligned_fgo_north_m"],
-        label="FGO antenna (SVD aligned)", linewidth=1.2,
-    )
-    axes[0].set(xlabel="East [m]", ylabel="North [m]", title="Trajectory")
+    axes[0].set(xlabel="East [m]", ylabel="North [m]", title="campus01 trajectory")
     axes[0].axis("equal")
     axes[0].grid(True)
     axes[0].legend()
-
-    for column, label in (("error_east_m", "East"), ("error_north_m", "North"), ("error_up_m", "Up")):
-        axes[1].plot(elapsed, synced[column], label=label)
-    axes[1].set(xlabel="Elapsed time [s]", ylabel="FGO - GT error [m]", title="Position error")
+    for axis in ("east", "north", "up"):
+        axes[1].plot(elapsed, synced[f"error_{axis}_m"], label=axis.title())
+    axes[1].set(xlabel="Elapsed GPST [s]", ylabel="FGO - RTK [m]", title="Position error")
     axes[1].grid(True)
     axes[1].legend()
     figure.tight_layout()
@@ -206,29 +152,32 @@ def save_plot(synced: pd.DataFrame, output_path: Path) -> None:
     plt.close(figure)
 
 
-def plot_rpy(synced: pd.DataFrame, output_path: Path) -> None:
-    """Plot FGO RPY and position-derived GT course in degrees."""
-    elapsed = (synced["timestamp_s"] - synced["timestamp_s"].iloc[0]).to_numpy()
-    yaw_deg = np.rad2deg(np.unwrap(synced["yaw"].to_numpy()))
-    velocity_east = np.gradient(synced["gt_east_m"].to_numpy(), elapsed)
-    velocity_north = np.gradient(synced["gt_north_m"].to_numpy(), elapsed)
-    speed = np.hypot(velocity_east, velocity_north)
-    course_deg = np.rad2deg(np.unwrap(np.arctan2(velocity_north, velocity_east)))
-    course_deg += 360.0 * np.round((yaw_deg[0] - course_deg[0]) / 360.0)
-    course_deg[speed < 0.2] = np.nan
-
-    figure, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
-    axes[0].plot(elapsed, np.rad2deg(synced["roll"]), color="green", label="FGO roll")
-    axes[1].plot(elapsed, np.rad2deg(synced["pitch"]), color="red", label="FGO pitch")
-    axes[2].plot(elapsed, yaw_deg, color="blue", label="FGO yaw")
-    axes[2].plot(elapsed, course_deg, "k--", linewidth=1.2, label="GT course from position")
-    axes[0].set_ylabel("Roll [deg]")
-    axes[1].set_ylabel("Pitch [deg]")
-    axes[2].set_ylabel("Yaw/course [deg]")
-    axes[2].set_xlabel("Elapsed time [s]")
-    for axis in axes:
+def save_rpy_plot(synced: pd.DataFrame, output_path: Path) -> None:
+    """Plot FGO attitude and synchronized ground-truth attitude."""
+    elapsed = (synced["gps_time_s"] - synced["gps_time_s"].iloc[0]).to_numpy()
+    fgo_angles = {
+        "Roll": np.rad2deg(synced["roll"].to_numpy()),
+        "Pitch": np.rad2deg(synced["pitch"].to_numpy()),
+        "Yaw": np.rad2deg(np.unwrap(synced["yaw"].to_numpy())),
+    }
+    gt_angles = {
+        "Roll": np.rad2deg(synced["gt_roll_rad"].to_numpy()),
+        "Pitch": np.rad2deg(synced["gt_pitch_rad"].to_numpy()),
+        "Yaw": np.rad2deg(synced["gt_yaw_rad"].to_numpy()),
+    }
+    # Put the unwrapped yaw curves on the nearest common 360-degree branch.
+    gt_angles["Yaw"] += 360.0 * np.round(
+        (fgo_angles["Yaw"][0] - gt_angles["Yaw"][0]) / 360.0
+    )
+    figure, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    for axis, name in zip(axes, ("Roll", "Pitch", "Yaw")):
+        axis.plot(elapsed, fgo_angles[name], label=f"FGO {name.lower()}")
+        axis.plot(elapsed, gt_angles[name], "k--", linewidth=1.1, label=f"GT {name.lower()}")
+        axis.set_ylabel(f"{name} [deg]")
         axis.grid(True)
         axis.legend()
+    axes[-1].set_xlabel("Elapsed GPST [s]")
+    figure.suptitle("campus01 attitude (GT heading converted to ENU yaw)")
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=150)
@@ -236,25 +185,26 @@ def plot_rpy(synced: pd.DataFrame, output_path: Path) -> None:
 
 
 def main() -> None:
-    with CONFIG_FILE.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-    lever_arm_body = np.asarray(config["gnss"]["lever_arm_body"], dtype=float)
-    df_fgo, df_gt = load_trajectories(FGO_FILE, GT_FILE)
-    synced = synchronize_trajectories(df_fgo, df_gt, lever_arm_body)
-    synced = align_antenna_trajectory_svd(synced)
-    print(f"FGO shape: {df_fgo.shape}")
-    print(f"GT shape:  {df_gt.shape}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fgo", type=Path, default=DEFAULT_FGO)
+    parser.add_argument("--gt", type=Path, default=DEFAULT_GT)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    args = parser.parse_args()
+    fgo, gt = load_trajectories(args.fgo, args.gt)
+    synced = synchronize_trajectories(fgo, gt)
+    if len(synced) >= 3:
+        synced = align_antenna_trajectory_svd(synced)
     print_metrics(synced)
-
-    error_csv = OUTPUT_DIR / "trajectory_error.csv"
-    plot_file = OUTPUT_DIR / "trajectory_comparison.png"
-    rpy_plot_file = OUTPUT_DIR / "rpy_changes.png"
-    synced.to_csv(error_csv, index=False)
-    save_plot(synced, plot_file)
-    plot_rpy(synced, rpy_plot_file)
-    print(f"Error CSV: {error_csv}")
-    print(f"Plot:      {plot_file}")
-    print(f"RPY plot:  {rpy_plot_file}")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = args.output_dir / "trajectory_gal_gps_error.csv"
+    plot_path = args.output_dir / "trajectory_gal_gps_comparison.png"
+    rpy_path = args.output_dir / "rpy_comparison_gal_gps.png"
+    synced.to_csv(csv_path, index=False)
+    save_plot(synced, plot_path)
+    save_rpy_plot(synced, rpy_path)
+    print(f"Error CSV: {csv_path.resolve()}")
+    print(f"Plot:      {plot_path.resolve()}")
+    print(f"RPY plot:  {rpy_path.resolve()}")
 
 
 if __name__ == "__main__":
