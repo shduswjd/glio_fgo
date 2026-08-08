@@ -11,6 +11,7 @@ from sensors.gnss_models import BeidouEphemeris, GalileoEphemeris, GpsEphemeris
 from sensors.gnss_raw import BroadcastEphemeris
 from sensors.gnss_satellite import (
     BEIDOU_GPS_WEEK_OFFSET, BEIDOU_TO_GPS_SECONDS, EphemerisStore,
+    SPEED_OF_LIGHT,
     beidou_ephemeris_from_rinex, classify_beidou_orbit,
     galileo_ephemeris_from_rinex, propagate_galileo, propagate_gps,
     rotate_for_sagnac,
@@ -34,6 +35,16 @@ def test_broadcast_propagation_has_physical_position_and_velocity():
     assert np.linalg.norm(state.position_ecef) == pytest.approx(26_560_000.0, rel=0.03)
     assert 1_000.0 < np.linalg.norm(state.velocity_ecef) < 5_000.0
     assert np.isfinite(state.clock_bias_s)
+
+
+def test_dual_frequency_gps_clock_omits_single_frequency_tgd():
+    ephemeris = sample_ephemeris()
+    timestamp = ephemeris.toc + 100.0
+    single = propagate_gps(ephemeris, timestamp, apply_group_delay=True)
+    dual = propagate_gps(ephemeris, timestamp, apply_group_delay=False)
+
+    assert dual.clock_bias_s - single.clock_bias_s == pytest.approx(ephemeris.tgd)
+    assert SPEED_OF_LIGHT * abs(dual.clock_bias_s - single.clock_bias_s) > 0.1
 
 
 def test_ephemeris_store_selects_nearest_toe():

@@ -70,7 +70,10 @@ def estimate_receiver_position(
             )
             transmit_time = epoch.gps_seconds - pseudorange / SPEED_OF_LIGHT
             ephemeris = ephemerides.nearest(observation.satellite, transmit_time)
-            satellite = propagate_gps(ephemeris, transmit_time)
+            satellite = propagate_gps(
+                ephemeris, transmit_time,
+                apply_group_delay=secondary_signal is None,
+            )
             satellite_position = rotate_for_sagnac(
                 satellite.position_ecef, epoch.gps_seconds - transmit_time
             )
@@ -88,6 +91,48 @@ def estimate_receiver_position(
         if np.linalg.norm(update[:3]) < 1e-3:
             break
     return position, clock_bias_m
+
+
+def estimate_receiver_clock_bias(
+    epoch: ObservationEpoch,
+    ephemerides: EphemerisStore,
+    receiver_position_ecef: np.ndarray,
+    signal: str = "1C",
+    secondary_signal: str | None = None,
+) -> float:
+    """Estimate only receiver clock bias [m] at a known ECEF position."""
+    position = np.asarray(receiver_position_ecef, dtype=float)
+    if position.shape != (3,) or not np.all(np.isfinite(position)):
+        raise ValueError("receiver_position_ecef must contain three finite values")
+    clock_estimates: list[float] = []
+    for observation in epoch.satellites:
+        if not observation.satellite.startswith("G"):
+            continue
+        pseudorange = (
+            observation.pseudorange(signal)
+            if secondary_signal is None else
+            observation.ionosphere_free_pseudorange(signal, secondary_signal)
+        )
+        if pseudorange is None:
+            continue
+        transmit_time = epoch.gps_seconds - pseudorange / SPEED_OF_LIGHT
+        ephemeris = ephemerides.nearest(observation.satellite, transmit_time)
+        satellite = propagate_gps(
+            ephemeris, transmit_time,
+            apply_group_delay=secondary_signal is None,
+        )
+        satellite_position = rotate_for_sagnac(
+            satellite.position_ecef, epoch.gps_seconds - transmit_time
+        )
+        geometric_range = np.linalg.norm(satellite_position - position)
+        clock_estimates.append(
+            float(pseudorange) - geometric_range
+            + SPEED_OF_LIGHT * satellite.clock_bias_s
+        )
+    if len(clock_estimates) < 4:
+        raise ValueError("clock initialization requires at least four GPS pseudoranges")
+    # A median prevents one urban-code outlier from shifting every clock state.
+    return float(np.median(clock_estimates))
 
 
 def _raw_options(config_path: Path) -> dict:
@@ -133,7 +178,9 @@ def main() -> None:
         position_source = "SPP"
     else:
         receiver_position = np.asarray(configured_position, dtype=float).reshape(3)
-        receiver_clock = float("nan")
+        receiver_clock = estimate_receiver_clock_bias(
+            first_epoch, ephemerides, receiver_position, signal, secondary_signal
+        )
         position_source = "config"
 
     print(f"OBS: {dataset.observation_path}")

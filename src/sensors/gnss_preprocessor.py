@@ -70,7 +70,15 @@ def prepare_epoch(
         )
         if orbit_type is not None and beidou_orbits is not None and orbit_type not in beidou_orbits:
             continue
-        state = propagate(ephemeris, transmit_time)
+        # GPS/Galileo broadcast clocks are dual-frequency clock datums. Their
+        # TGD/BGD corrections are for single-frequency users and must not be
+        # applied again to an ionosphere-free code combination. BDS B2I/B3I
+        # retains its explicit B3-referenced combination correction.
+        apply_group_delay = observation_secondary is None or system == "C"
+        state = propagate(
+            ephemeris, transmit_time,
+            apply_group_delay=apply_group_delay,
+        )
         travel_time = receive_time - transmit_time
         position = rotate_for_sagnac(state.position_ecef, travel_time)
         velocity = rotate_for_sagnac(state.velocity_ecef, travel_time)

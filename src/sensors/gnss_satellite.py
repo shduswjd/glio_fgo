@@ -157,6 +157,7 @@ def _position_and_clock(
     ephemeris: GpsEphemeris | GalileoEphemeris | BeidouEphemeris,
     gps_time: float,
     gravitational_constant: float,
+    apply_group_delay: bool = True,
 ) -> tuple[np.ndarray, float]:
     toe_time = _toe_time_gps(ephemeris)
     tk = _wrap_week(gps_time - toe_time)
@@ -198,16 +199,21 @@ def _position_and_clock(
         f2_sq = BEIDOU_B2I_FREQUENCY_HZ**2
         f3_sq = BEIDOU_B3I_FREQUENCY_HZ**2
         group_delay = f2_sq / (f2_sq - f3_sq) * ephemeris.tgd_b2_b3
+    if not apply_group_delay:
+        group_delay = 0.0
     clock = ephemeris.af0 + ephemeris.af1 * dt + ephemeris.af2 * dt * dt + relativity - group_delay
     return position, clock
 
 
-def propagate_gps(ephemeris: GpsEphemeris, transmit_time: float) -> SatelliteState:
+def propagate_gps(
+    ephemeris: GpsEphemeris, transmit_time: float,
+    apply_group_delay: bool = True,
+) -> SatelliteState:
     """Propagate broadcast ephemeris; velocity and drift use a stable central difference."""
     step = 0.5
-    position, clock = _position_and_clock(ephemeris, transmit_time, GPS_GRAVITATIONAL_CONSTANT)
-    before_position, before_clock = _position_and_clock(ephemeris, transmit_time - step, GPS_GRAVITATIONAL_CONSTANT)
-    after_position, after_clock = _position_and_clock(ephemeris, transmit_time + step, GPS_GRAVITATIONAL_CONSTANT)
+    position, clock = _position_and_clock(ephemeris, transmit_time, GPS_GRAVITATIONAL_CONSTANT, apply_group_delay)
+    before_position, before_clock = _position_and_clock(ephemeris, transmit_time - step, GPS_GRAVITATIONAL_CONSTANT, apply_group_delay)
+    after_position, after_clock = _position_and_clock(ephemeris, transmit_time + step, GPS_GRAVITATIONAL_CONSTANT, apply_group_delay)
     return SatelliteState(
         satellite=ephemeris.satellite,
         transmit_time=transmit_time,
@@ -218,12 +224,15 @@ def propagate_gps(ephemeris: GpsEphemeris, transmit_time: float) -> SatelliteSta
     )
 
 
-def propagate_galileo(ephemeris: GalileoEphemeris, transmit_time: float) -> SatelliteState:
+def propagate_galileo(
+    ephemeris: GalileoEphemeris, transmit_time: float,
+    apply_group_delay: bool = True,
+) -> SatelliteState:
     """Propagate a Galileo broadcast ephemeris and satellite clock."""
     step = 0.5
-    position, clock = _position_and_clock(ephemeris, transmit_time, GALILEO_GRAVITATIONAL_CONSTANT)
-    before_position, before_clock = _position_and_clock(ephemeris, transmit_time - step, GALILEO_GRAVITATIONAL_CONSTANT)
-    after_position, after_clock = _position_and_clock(ephemeris, transmit_time + step, GALILEO_GRAVITATIONAL_CONSTANT)
+    position, clock = _position_and_clock(ephemeris, transmit_time, GALILEO_GRAVITATIONAL_CONSTANT, apply_group_delay)
+    before_position, before_clock = _position_and_clock(ephemeris, transmit_time - step, GALILEO_GRAVITATIONAL_CONSTANT, apply_group_delay)
+    after_position, after_clock = _position_and_clock(ephemeris, transmit_time + step, GALILEO_GRAVITATIONAL_CONSTANT, apply_group_delay)
     return SatelliteState(
         satellite=ephemeris.satellite, transmit_time=transmit_time,
         position_ecef=position,
@@ -312,12 +321,15 @@ def propagate_beidou(ephemeris: BeidouEphemeris, transmit_time: float) -> Satell
     )
 
 
-def propagate(ephemeris: GpsEphemeris | GalileoEphemeris | BeidouEphemeris, transmit_time: float) -> SatelliteState:
+def propagate(
+    ephemeris: GpsEphemeris | GalileoEphemeris | BeidouEphemeris,
+    transmit_time: float, apply_group_delay: bool = True,
+) -> SatelliteState:
     """Dispatch broadcast propagation by ephemeris type."""
     if isinstance(ephemeris, GpsEphemeris):
-        return propagate_gps(ephemeris, transmit_time)
+        return propagate_gps(ephemeris, transmit_time, apply_group_delay)
     if isinstance(ephemeris, GalileoEphemeris):
-        return propagate_galileo(ephemeris, transmit_time)
+        return propagate_galileo(ephemeris, transmit_time, apply_group_delay)
     if isinstance(ephemeris, BeidouEphemeris):
         return propagate_beidou(ephemeris, transmit_time)
     raise TypeError(f"unsupported ephemeris type: {type(ephemeris).__name__}")

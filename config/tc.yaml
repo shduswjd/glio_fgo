@@ -34,11 +34,18 @@ gnss_raw:
     cn0_reference_dbhz: 40.0
     cn0_max_scale: 4.0
     minimum_cn0_dbhz: 20.0
+    # A/B tests with 10 m and 20 m gates improved horizontal RMSE but degraded
+    # Up observability and 3D RMSE. Keep the validated code-only baseline here;
+    # persistent satellite faults are handled by the residual diagnostic until
+    # a temporal integrity monitor is introduced.
     residual_gate_m: 30.0
+    # Optional epoch-wise Doppler velocity-fit gate, e.g. 1.5. Disabled in the
+    # validated baseline so code-gate and Doppler-gate effects remain separate.
+    doppler_residual_gate_mps: null
   doppler_sigma_mps: 0.3
-  # null: estimate the first receiver ECEF position with pseudorange SPP.
-  # If a surveyed value is available, use [x, y, z] metres for faster startup.
-  initial_position_ecef: null
+  # Surveyed/RTK antenna position at the first processed epoch (180590 GPST).
+  # Set null on datasets without a surveyed start; code SPP is then the fallback.
+  initial_position_ecef: [-2267409.661, 5008858.838, 3221978.014]
 
 tightly_coupled:
   gravity_mps2: 9.81
@@ -76,6 +83,7 @@ tightly_coupled:
   prior_noise:
     rotation_sigma_rad: [0.1, 0.1, 0.5]
     position_sigma_m: [3.0, 3.0, 5.0]
+    surveyed_position_sigma_m: [0.1, 0.1, 0.2]
     velocity_sigma_mps: 1.0
     accel_bias_sigma_mps2: [0.1, 0.1, 0.1]
     gyro_bias_sigma_radps: [0.01, 0.01, 0.01]

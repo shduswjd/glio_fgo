@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import replace
 from pathlib import Path
 
 import gtsam
@@ -25,7 +26,9 @@ from factors.prior import create_prior_factors, create_prior_noise
 from factors.troposphere import (
     create_wet_delay_random_walk_factor, wet_delay_key,
 )
-from run_tc_gnss import configured_signals, estimate_receiver_position
+from run_tc_gnss import (
+    configured_signals, estimate_receiver_clock_bias, estimate_receiver_position,
+)
 from sensors.gnss_corrections import ecef_R_enu
 from sensors.gnss_preprocessor import prepare_epoch
 from sensors.gnss_raw import load_tc_config, read_rinex_observations, read_tc_navigation
@@ -167,6 +170,42 @@ def estimate_velocity_and_clock_drift(measurements, receiver_ecef: np.ndarray) -
     return solution[:3], float(solution[3])
 
 
+def gate_doppler_residuals(
+    measurements, receiver_ecef: np.ndarray, threshold_mps: float | None,
+):
+    """Remove only Doppler fields with large epoch-wise velocity-fit residuals."""
+    if threshold_mps is None:
+        return list(measurements)
+    threshold = float(threshold_mps)
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("doppler_residual_gate_mps must be positive")
+    velocity, clock_drift = estimate_velocity_and_clock_drift(
+        measurements, receiver_ecef
+    )
+    doppler_count = sum(item.range_rate_mps is not None for item in measurements)
+    if doppler_count < 5:
+        return list(measurements)
+    gated = []
+    for measurement in measurements:
+        if measurement.range_rate_mps is None:
+            gated.append(measurement)
+            continue
+        satellite = measurement.satellite_state
+        delta = satellite.position_ecef - receiver_ecef
+        line_of_sight = delta / np.linalg.norm(delta)
+        predicted = (
+            line_of_sight @ (satellite.velocity_ecef - velocity)
+            + clock_drift
+            - SPEED_OF_LIGHT * satellite.clock_drift_sps
+        )
+        residual = predicted - measurement.range_rate_mps
+        gated.append(
+            replace(measurement, range_rate_mps=None)
+            if abs(float(residual)) > threshold else measurement
+        )
+    return gated
+
+
 def _measurement_sigma(raw: dict, measurement) -> float:
     configured = raw["pseudorange_sigma_m"]
     if isinstance(configured, dict):
@@ -226,9 +265,20 @@ def build_tightly_coupled_graph(
     minimum_cn0 = None if minimum_cn0 is None else float(minimum_cn0)
     residual_gate = weighting.get("residual_gate_m")
     residual_gate = None if residual_gate is None else float(residual_gate)
-    reference_ecef, initial_clock = estimate_receiver_position(
-        epochs[0], ephemerides, signal, secondary_signal
-    )
+    configured_position = raw.get("initial_position_ecef")
+    if configured_position is None:
+        reference_ecef, initial_clock = estimate_receiver_position(
+            epochs[0], ephemerides, signal, secondary_signal
+        )
+        surveyed_initial_position = False
+    else:
+        reference_ecef = np.asarray(configured_position, dtype=float)
+        if reference_ecef.shape != (3,) or not np.all(np.isfinite(reference_ecef)):
+            raise ValueError("gnss_raw.initial_position_ecef requires 3 finite values")
+        initial_clock = estimate_receiver_clock_bias(
+            epochs[0], ephemerides, reference_ecef, signal, secondary_signal
+        )
+        surveyed_initial_position = True
     frame_rotation = ecef_R_enu(reference_ecef)
     lever = np.asarray(tc["lever_arm_body_m"], dtype=float)
     imu_noise = ImuNoise(**tc["imu_noise"])
@@ -249,6 +299,9 @@ def build_tightly_coupled_graph(
         signals=signals,
         beidou_orbits=beidou_orbits,
         minimum_cn0_dbhz=minimum_cn0, residual_gate_m=residual_gate,
+    )
+    first_prepared = gate_doppler_residuals(
+        first_prepared, reference_ecef, weighting.get("doppler_residual_gate_mps")
     )
     velocity_ecef, initial_drift = estimate_velocity_and_clock_drift(first_prepared, reference_ecef)
     initial_imu_cursor = _nearest_imu_index(imu, epochs[0].gps_seconds_of_week)
@@ -272,6 +325,10 @@ def build_tightly_coupled_graph(
                 minimum_elevation_deg=float(raw["minimum_elevation_deg"]),
                 signals=signals, beidou_orbits=beidou_orbits,
                 minimum_cn0_dbhz=minimum_cn0, residual_gate_m=residual_gate,
+            )
+            alignment_prepared = gate_doppler_residuals(
+                alignment_prepared, alignment_ecef,
+                weighting.get("doppler_residual_gate_mps"),
             )
             alignment_velocity_ecef, _ = estimate_velocity_and_clock_drift(
                 alignment_prepared, alignment_ecef
@@ -329,9 +386,14 @@ def build_tightly_coupled_graph(
         values.insert(beidou_isb_key(0), 0.0)
     if use_wet_delay:
         values.insert(wet_delay_key(0), 0.0)
+    initial_position_sigma = np.asarray(
+        prior.get("surveyed_position_sigma_m", prior["position_sigma_m"])
+        if surveyed_initial_position else prior["position_sigma_m"],
+        dtype=float,
+    )
     navigation_priors = create_prior_noise(
         np.asarray(prior["rotation_sigma_rad"]),
-        np.asarray(prior["position_sigma_m"]),
+        initial_position_sigma,
         float(prior["velocity_sigma_mps"]),
         np.asarray(prior["accel_bias_sigma_mps2"]),
         np.asarray(prior["gyro_bias_sigma_radps"]),
@@ -457,6 +519,9 @@ def build_tightly_coupled_graph(
             signals=signals,
             beidou_orbits=beidou_orbits,
             minimum_cn0_dbhz=minimum_cn0, residual_gate_m=residual_gate,
+        )
+        prepared = gate_doppler_residuals(
+            prepared, receiver_ecef, weighting.get("doppler_residual_gate_mps")
         )
         velocity_ecef, clock_drift = estimate_velocity_and_clock_drift(prepared, receiver_ecef)
         antenna_local = frame_rotation.T @ (receiver_ecef - reference_ecef)

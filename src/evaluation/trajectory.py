@@ -186,6 +186,60 @@ def save_rpy_plot(synced: pd.DataFrame, output_path: Path) -> None:
     plt.close(figure)
 
 
+def attitude_errors_deg(synced: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Return FGO minus GT attitude errors in degrees, with wrapped yaw."""
+    errors = {
+        "Yaw": np.rad2deg(
+            synced["yaw"].to_numpy() - synced["gt_yaw_rad"].to_numpy()
+        ),
+        "Pitch": np.rad2deg(
+            synced["pitch"].to_numpy() - synced["gt_pitch_rad"].to_numpy()
+        ),
+        "Roll": np.rad2deg(
+            synced["roll"].to_numpy() - synced["gt_roll_rad"].to_numpy()
+        ),
+    }
+    errors["Yaw"] = (errors["Yaw"] + 180.0) % 360.0 - 180.0
+    return errors
+
+
+def save_attitude_error_scatter(synced: pd.DataFrame, output_path: Path) -> None:
+    """Plot GREAT-PIFGO-style yaw, pitch, and roll error scatter panels."""
+    elapsed = (synced["gps_time_s"] - synced["gps_time_s"].iloc[0]).to_numpy()
+    errors = attitude_errors_deg(synced)
+    colors = {"Yaw": "red", "Pitch": "green", "Roll": "blue"}
+    threshold = 1.0
+    figure, axes = plt.subplots(3, 1, figsize=(13, 10), sharex=True, sharey=True)
+    for axis, name in zip(axes, ("Yaw", "Pitch", "Roll")):
+        error = errors[name]
+        mae = float(np.mean(np.abs(error)))
+        rmse = float(np.sqrt(np.mean(error**2)))
+        axis.scatter(
+            elapsed, error, s=10, color=colors[name], alpha=0.72,
+            edgecolors="none", label=name,
+        )
+        axis.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
+        axis.axhline(
+            threshold, color="0.65", linestyle="--", linewidth=1.0,
+            label=f"{threshold:.1f}(deg) Threshold",
+        )
+        axis.axhline(-threshold, color="0.65", linestyle="--", linewidth=1.0)
+        axis.set_ylabel(f"{name} Error (deg)")
+        axis.set_title(
+            f"{name} Attitude Errors (MAE: {mae:.3f}(deg), "
+            f"RMSE: {rmse:.3f}(deg))"
+        )
+        axis.set_ylim(-3.0, 3.0)
+        axis.grid(True, alpha=0.3)
+        axis.legend(loc="upper right")
+    axes[-1].set_xlabel("Elapsed GPST (s)")
+    figure.suptitle("Attitude Errors: IMU-GNSS-FGO")
+    figure.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fgo", type=Path, default=DEFAULT_FGO)
@@ -201,12 +255,17 @@ def main() -> None:
     csv_path = args.output_dir / "trajectory_gal_gps_error.csv"
     plot_path = args.output_dir / "trajectory_gal_gps_comparison.png"
     rpy_path = args.output_dir / "rpy_comparison_gal_gps.png"
+    attitude_error_path = args.output_dir / "attitude_error_scatter.png"
+    for name, error in attitude_errors_deg(synced).items():
+        synced[f"error_{name.lower()}_deg"] = error
     synced.to_csv(csv_path, index=False)
     save_plot(synced, plot_path)
     save_rpy_plot(synced, rpy_path)
+    save_attitude_error_scatter(synced, attitude_error_path)
     print(f"Error CSV: {csv_path.resolve()}")
     print(f"Plot:      {plot_path.resolve()}")
     print(f"RPY plot:  {rpy_path.resolve()}")
+    print(f"Attitude error scatter: {attitude_error_path.resolve()}")
 
 
 if __name__ == "__main__":
